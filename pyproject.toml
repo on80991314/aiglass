@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-smart-glasses"
+version = "0.3.0"
+description = "Cost-effective AI smart glasses (ESP32-S3 + Python edge + cloud)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+# Make `import audio.mic`, `import vision.labels` etc. work the same
+# inside tests and inside the edge launcher.
+pythonpath = ["edge"]
+testpaths = ["edge/tests", "tests"]
+addopts = "-ra -q"

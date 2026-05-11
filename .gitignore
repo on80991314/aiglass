@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +217,38 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+=======
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.log
+
+# Arduino / PlatformIO build artifacts
+build/
+.pio/
+*.hex
+*.bin
+*.elf
+
+# ML model weights (keep large binaries out of git)
+*.pt
+*.onnx
+*.engine
+*.task
+models/*.pt
+models/*.onnx
+models/*.engine
+models/*.task
+
+# 3rd-party reference project — kept locally for the WAV voice cues but
+# not part of our source tree
+OpenAIglasses_for_Navigation-main/
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+>>>>>>> 7be220d (Initial commit with basic code)

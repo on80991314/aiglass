@@ -1,0 +1,33 @@
+# ============================================================
+# AI Smart Glasses — Python dependencies
+# Install:  pip install -r requirements.txt
+# ============================================================
+
+# ---- Phase 1: video link ----
+websockets>=12.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+
+# ---- Phase 2: detection + hands + mic ----
+ultralytics>=8.2.0          # YOLOv8
+mediapipe>=0.10.14          # HandLandmarker (Tasks API)
+sounddevice>=0.4.6
+
+# ---- Phase 3: speech + cloud APIs ----
+faster-whisper>=1.0.3       # local Whisper STT
+openai>=1.40.0              # also used as the Groq Whisper / Llama client
+pyttsx3>=2.90 ; platform_system == "Windows"
+edge-tts>=6.1.10            # Microsoft Edge neural zh-TW voice
+pydub>=0.25.1               # mp3 decode for edge-tts (needs ffmpeg on PATH)
+google-generativeai>=0.7
+googlemaps>=4.10
+opencc-python-reimplemented>=0.1.7  # simplified -> traditional Chinese for STT output
+
+# ---- UI ----
+Pillow>=10.0                # CJK text rendering on the OpenCV preview
+
+# ---- Optional: better voice activity detection ----
+# webrtcvad-wheels>=2.0.14  # uncomment to enable webrtcvad in MicListener
+
+# ---- Optional: only needed if mic sample_rate != 16000 ----
+librosa>=0.10.2
