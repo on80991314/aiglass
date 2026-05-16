@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# aiglass
-=======
 # AI Smart Glasses
 
 高性價比 AI 智慧輔助眼鏡 — ESP32-S3 硬體 + Python edge + 雲端 LLM/Maps。
@@ -132,4 +129,3 @@ pytest tests/test_labels.py    # 單一檔
 - ✅ Phase 3 — STT + TTS + Groq/Gemini intent + 語音提示
 - ✅ Phase 3.5 — Find-and-grab FSM with CONFIRM_GRAB confirmation
 - 🚧 Phase 4 — IMU 跌倒實機測試、Google Maps 導航整合
->>>>>>> 7be220d (Initial commit with basic code)

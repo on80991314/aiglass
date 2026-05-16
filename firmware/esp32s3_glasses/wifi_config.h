@@ -1,9 +1,9 @@
 #pragma once
 
-#define WIFI_SSID   "303-5G"
-#define WIFI_PASS   "gfourg40"
+#define WIFI_SSID   "D-Link_DIR-13"
+#define WIFI_PASS   "0918850082"
 
-#define WS_HOST     "192.168.0.12"
+#define WS_HOST     "192.168.100.3"
 #define WS_PORT     8765
 #define WS_PATH     "/hub"
 

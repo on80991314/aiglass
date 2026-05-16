@@ -1,9 +1,9 @@
 r"""Full multi-mode glasses orchestrator (Phase 3+).
 
 Wires together (with the original 5-state top-level FSM):
-   Hub (WS)  ->  YOLO detector       ->  FSM (FIND/NAV) ->  TTS  ->  Hub
+    Hub (WS)  ->  YOLO detector       ->  FSM (FIND/NAV) ->  TTS  ->  Hub
          \->   Fall detector  ->  FSM
-         \->   STT       ->  Gemini intent  ->  FSM
+         \->   STT        ->  Groq intent  ->  FSM
 
 Safe to run with a Phase-1 ESP32-S3 streamer: only the video pipeline
 activates; audio / IMU branches stay idle until the corresponding
@@ -19,10 +19,14 @@ import argparse
 import asyncio
 import logging
 import time
+import json  # 🟢 引入 JSON 處理庫
 from typing import Optional
 
 import cv2
 import numpy as np
+
+import os
+from groq import Groq
 
 from audio.stt import WhisperSTT
 from audio.tts import TTS
@@ -58,6 +62,15 @@ class App:
         if cfg.gemini_api_key:
             from cloud.gemini.gemini import GeminiClient
             self._gemini = GeminiClient(cfg.gemini_api_key, cfg.gemini_model)
+        
+        # 🟢 新增：初始化 Groq 用戶端（直接從環境變數讀取金鑰）
+        self.groq_client = None
+        groq_key = os.getenv("GROQ_API_KEY")
+        if groq_key:
+            self.groq_client = Groq(api_key=groq_key)
+        else:
+            log.warning("環境變數中未偵測到 GROQ_API_KEY！")
+
         self._gmap = None
         if cfg.gmap_api_key:
             from cloud.gmap.maps import GmapClient
@@ -74,6 +87,10 @@ class App:
     # ========= callbacks =========
     async def on_frame(self, peer: str, frame: np.ndarray) -> None:
         # throttle YOLO to ~6 fps so a laptop CPU keeps up
+
+        cv2.imshow("ESP32 Glasses View", frame)
+        cv2.waitKey(1)
+
         now = time.monotonic()
         if now - self._last_frame_t < 0.15:
             return
@@ -148,10 +165,41 @@ class App:
             return
         log.info("heard: %s", text)
 
-        if self._gemini is None:
-            self._queue_say("尚未設定 Gemini 金鑰，無法理解語音指令")
+        # 🟢 修改：改用 Groq 的 Llama-3.3 進行結構化意圖解析與閒聊回覆
+        if self.groq_client is None:
+            self._queue_say("尚未設定 Groq 金鑰，無法理解語音指令")
             return
-        intent = normalize_obj(await self._gemini.parse_intent(text))
+
+        try:
+            # 透過執行緒調用 Groq，避免阻塞 asyncio 異步主流程
+            response = await asyncio.to_thread(
+                self.groq_client.chat.completions.create,
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一個智慧眼鏡的意圖分析與對話助手。請分析使用者的語音輸入，並嚴格回傳以下格式的 JSON 物件：\n"
+                            "{\n"
+                            "  \"intent\": \"NAV_TO\" 或 \"FIND_OBJECT\" 或 \"TRANSLATE_TO\" 或 \"CANCEL\" 或 \"CHAT\",\n"
+                            "  \"destination\": \"導航目的地(若無則為空字串)\",\n"
+                            "  \"object\": \"尋找的物品(若無則為空字串)\",\n"
+                            "  \"lang\": \"翻譯語言(預設為 'zh-TW')\",\n"
+                            "  \"reply\": \"當意圖為 CHAT 時，請在此提供親切的回答（台灣繁體中文，且控制在 30 個字以內）。其他意圖時此欄位請留空。\"\n"
+                            "}"
+                        )
+                    },
+                    {"role": "user", "content": text}
+                ],
+                response_format={"type": "json_object"}
+            )
+            intent = json.loads(response.choices[0].message.content)
+            intent = normalize_obj(intent)
+        except Exception as e:
+            log.warning("Groq 大腦調用或解析失敗: %s", e)
+            self._queue_say("抱歉，我的大腦連線發生錯誤")
+            return
+
         name = (intent.get("intent") or "CHAT").upper()
 
         if name == "NAV_TO":
@@ -164,7 +212,8 @@ class App:
         elif name == "CANCEL":
             self.fsm.on_intent(Intent.CANCEL, {})
         else:
-            reply = await self._gemini.chat(text)
+            # 🟢 這裡承接了 Groq 即時產生的對話回覆
+            reply = intent.get("reply")
             if reply:
                 self._queue_say(reply[:200])
 

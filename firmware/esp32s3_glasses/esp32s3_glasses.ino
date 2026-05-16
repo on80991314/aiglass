@@ -184,10 +184,10 @@ static bool initCamera() {
   c.pixel_format = PIXFORMAT_JPEG;
   // OV5640 支援最高 UXGA，串流用 VGA 即可；改 FRAMESIZE_SVGA (800x600) 若影像較模糊
   if (psramFound()) {
-    c.frame_size=FRAMESIZE_VGA; c.jpeg_quality=10; c.fb_count=2;
+    c.frame_size=FRAMESIZE_QVGA; c.jpeg_quality=15; c.fb_count=2;
     c.fb_location=CAMERA_FB_IN_PSRAM; c.grab_mode=CAMERA_GRAB_LATEST;
   } else {
-    c.frame_size=FRAMESIZE_QVGA; c.jpeg_quality=15; c.fb_count=1;
+    c.frame_size=FRAMESIZE_QQVGA; c.jpeg_quality=20; c.fb_count=1;
     c.fb_location=CAMERA_FB_IN_DRAM; c.grab_mode=CAMERA_GRAB_WHEN_EMPTY;
   }
   if (esp_camera_init(&c) != ESP_OK) return false;
@@ -455,7 +455,8 @@ static bool wsConnect() {
 }
 
 void setup() {
-  Serial.begin(115200); delay(200);
+  Serial.begin(115200); while (!Serial) { delay(10); } // 🖐️ 叫 ESP32 在這裡罰站，直到電腦的序列埠監控視窗成功連上
+  delay(2000);
   Serial.println("\n=== AI Smart Glasses ===");
 
   // I2C
@@ -473,13 +474,13 @@ void setup() {
     Serial.println("[BNO] BNO055 ready (raw I2C, NDOF mode)");
   } else { Serial.println("[BNO] not found"); }
 
-  Serial.println("[STEP] init camera...");
-  if (!initCamera())  { Serial.println("[CAM] init fail"); }
-  else                { Serial.println("[CAM] ok"); }
-
   Serial.println("[STEP] init mic...");
   if (!initPdmMic())  { Serial.println("[MIC] PDM init fail"); }
   else                { Serial.println("[MIC] init ok, warming up..."); warmupMic(); }
+
+  Serial.println("[STEP] init camera...");
+  if (!initCamera())  { Serial.println("[CAM] init fail"); }
+  else                { Serial.println("[CAM] ok"); }
 
   Serial.println("[STEP] gain pin...");
   pinMode(SPK_GAIN_PIN, OUTPUT);
