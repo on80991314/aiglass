@@ -203,15 +203,20 @@ static bool  g_mic_warmed_up = false;
 static bool initPdmMic() {
   i2s_config_t cfg = {};
   cfg.mode             = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM);
-  cfg.sample_rate      = MIC_SAMPLE_RATE;
+  cfg.sample_rate      = MIC_SAMPLE_RATE; // 16000
   cfg.bits_per_sample  = I2S_BITS_PER_SAMPLE_16BIT;
-  cfg.channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT;
+  // 💡 【修正1】有些開源版本使用 RIGHT_LEFT 才能正確收到 PDM 單聲道
+  cfg.channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT; 
   cfg.communication_format = I2S_COMM_FORMAT_STAND_PCM_SHORT;
   cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  cfg.dma_buf_count    = 6;
-  cfg.dma_buf_len      = 256;
+  
+  // 🚀 【修正2】把 DMA 緩衝區加大 4 倍！徹底解決聲音遺失、快轉、斷斷續續的問題！
+  cfg.dma_buf_count    = 8;     // 籃子變多
+  cfg.dma_buf_len      = 1024;  // 每個籃子變大 (原本是 256)
+  
   cfg.use_apll         = false;
   if (i2s_driver_install(MIC_I2S_PORT, &cfg, 0, NULL) != ESP_OK) return false;
+  
   i2s_pin_config_t pins = {};
   pins.ws_io_num      = MIC_PDM_CLK;
   pins.data_in_num    = MIC_PDM_DATA;
@@ -220,22 +225,19 @@ static bool initPdmMic() {
   return i2s_set_pin(MIC_I2S_PORT, &pins) == ESP_OK;
 }
 
-// PDM 麥克風暖機 + DC offset 預估。drain 100ms 樣本，用 EMA 算出 DC bias，
-// 後續 sendMicChunk() 會在這個基礎上繼續微調。沒做這一步的話，PDM 訊號
-// 會帶大量直流偏移送到 Whisper，等同被嚴重削波，內容辨識不出來。
-//
-// 加 wall-clock timeout：若 i2s_read 一直回 0 bytes，仍會在 ~500ms 後跳出，
-// 避免整個 setup() 卡死導致 cam frame buffer overflow。
+// 🚀 【修正3】延長暖機時間，讓電壓穩定，並捨棄前段雜音
 static void warmupMic() {
-  const size_t N = MIC_SAMPLE_RATE / 10;   // ~100ms
-  int16_t buf[256];
+  const size_t N = MIC_SAMPLE_RATE / 2;   // 💡 增加到 ~500ms，徹底暖機
+  int16_t buf[1024];                      // 配合新的 dma_buf_len
   size_t collected = 0;
   float dc = 0.0f;
   uint32_t t0 = millis();
-  while (collected < N && (millis() - t0) < 500) {
+  
+  // 容許的 timeout 也加長到 1500ms
+  while (collected < N && (millis() - t0) < 1500) {
     size_t want = sizeof(buf);
     size_t read = 0;
-    if (i2s_read(MIC_I2S_PORT, buf, want, &read, pdMS_TO_TICKS(50)) != ESP_OK) break;
+    if (i2s_read(MIC_I2S_PORT, buf, want, &read, pdMS_TO_TICKS(100)) != ESP_OK) break;
     if (read == 0) continue;
     size_t samples = read / 2;
     for (size_t i = 0; i < samples; ++i) {

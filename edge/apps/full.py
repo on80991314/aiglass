@@ -123,12 +123,12 @@ class App:
         # simple energy VAD - collect until ~1s of silence then transcribe
         energy = float(np.abs(pcm).mean())
         now = time.monotonic()
-        if energy > 300:
+        if energy > 100:
             self._last_audio_voice_t[peer] = now
 
         total_samples = sum(len(x) for x in buf)
         silence_s = now - self._last_audio_voice_t.get(peer, now)
-        if total_samples > sr * 10 or (total_samples > sr * 1 and silence_s > 1.0):
+        if total_samples > sr * 10 or (total_samples > sr * 1 and silence_s > 2.0):
             audio = np.concatenate(buf)
             buf.clear()
             self._last_audio_voice_t.pop(peer, None)
