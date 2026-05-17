@@ -27,6 +27,10 @@ This is the broad-coverage app. For pure find-and-grab use
     - 語音說「停止」→ 回到 IDLE
     - 整合自 aiglass3 trafficlight_detection.py 的邏輯
 
+  視覺問答（VISUAL_QUERY）:
+    - 語音說「幫我看看這是什麼」→ on_frame 保存的最新幀送 Gemini 描述
+    - 整合自 aiglass3 的 VLM 識別功能
+
 STT 噪音過濾（Bug fix v2）:
   - Whisper 在環境音（電視/廣播/歌詞/字幕聲）下會辨識出不相干文字
   - 加入關鍵字白名單：只有包含指令關鍵字的辨識結果才會進入意圖路由
@@ -76,8 +80,8 @@ _ALLOWED_KEYWORDS = [
     "馬路", "马路", "斑馬", "斑马", "過馬", "过马",
     "過馬路", "过马路", "斑馬線", "斑马线",
     "紅綠燈", "红绿灯",
-    "紅燈", "红灯",     # ← Bug fix: 原本與「綠燈」間漏逗號導致拼接
-    "綠燈", "绿灯",     # ← 已修正
+    "紅燈", "红灯",
+    "綠燈", "绿灯",
     "紅燈停", "绿灯走", "可以過", "可以通過",
     "看紅綠燈", "看红绿灯", "檢測紅綠燈", "检测红绿灯",
     # 導航 / 盲道
@@ -140,6 +144,8 @@ class App:
         self._last_frame_t = 0.0
         self._audio_buf: dict[str, list[np.ndarray]] = {}
         self._last_audio_voice_t: dict[str, float] = {}
+        # 供視覺問答使用的最新幀快取
+        self._latest_frame: Optional[np.ndarray] = None
 
         # ── Gemini（選擇性）──
         self._gemini = None
@@ -177,11 +183,8 @@ class App:
         self._cross_guidance_interval: float = float(os.getenv("CROSS_GUIDANCE_INTERVAL_S", "2.5"))
 
         # ── 紅綠燈偵測（TRAFFIC_LIGHT 狀態，整合自 aiglass3）──────────────────
-        # 持續偵測並播報，不走完整過馬路流程。
-        # 節流間隔透過 TRAFFIC_LIGHT_INTERVAL_S 環境變數調整（預設 3 秒）。
         self._last_tl_t: float = 0.0
         self._tl_interval: float = float(os.getenv("TRAFFIC_LIGHT_INTERVAL_S", "3.0"))
-        # 記錄上次偵測到的顏色，避免連續重複播報同一顏色
         self._last_tl_color: str = ""
 
     # ========= run =========
@@ -194,6 +197,9 @@ class App:
 
     # ========= callbacks =========
     async def on_frame(self, peer: str, frame: np.ndarray) -> None:
+        # 保存最新幀供視覺問答（_visual_query）使用
+        self._latest_frame = frame
+
         cv2.imshow("ESP32 Glasses View", frame)
         cv2.waitKey(1)
 
@@ -235,14 +241,14 @@ class App:
 
     async def _handle_traffic_light_frame(self, frame: np.ndarray, now: float) -> None:
         """TRAFFIC_LIGHT 狀態：持續偵測紅綠燈並播報。
-        
+
         整合自 aiglass3 trafficlight_detection.py 的邏輯：
         - 偵測 red / yellow / green 三種狀態
         - 節流（_tl_interval，預設 3 秒）避免過度播報
         - 同一顏色連續出現不重複播報，直到顏色變化
         """
         if (now - self._last_tl_t) < self._tl_interval:
-            return  # 節流
+            return
 
         dets = await asyncio.to_thread(self.detector.infer, frame)
 
@@ -252,12 +258,11 @@ class App:
                 color = traffic_light_color(frame, d)
                 if color in ("red", "green", "yellow"):
                     detected_color = color
-                    break  # 取第一個偵測到的燈
+                    break
 
         if not detected_color:
-            return  # 沒有偵測到任何燈，不播報
+            return
 
-        # 顏色沒有變化則不重複播報
         if detected_color == self._last_tl_color:
             return
 
@@ -433,7 +438,7 @@ class App:
                 except Exception:
                     pass
             if self.fsm.state == State.TRAFFIC_LIGHT:
-                self._last_tl_color = ""  # 重置偵測記錄
+                self._last_tl_color = ""
             self.fsm._goto(State.IDLE, "已取消")
             return
 
@@ -451,7 +456,7 @@ class App:
 
         # ── 啟動紅綠燈偵測（aiglass3 整合）────────────────────────────────
         if kind == "START_TRAFFIC_LIGHT":
-            self._last_tl_color = ""  # 重置，確保首次偵測一定播報
+            self._last_tl_color = ""
             self._last_tl_t = 0.0
             self.fsm._goto(State.TRAFFIC_LIGHT, "已啟動紅綠燈偵測")
             return
@@ -483,22 +488,15 @@ class App:
             return
 
     async def _visual_query(self) -> None:
-        """視覺問答：拍一幀，送 VLM（Gemini）描述畫面內容。
-        
-        整合自 aiglass3 的視覺識別功能。
-        需要 GEMINI_API_KEY 設定。
-        """
+        """視覺問答：使用最新幀送 Gemini VLM 描述畫面內容。"""
         if self._gemini is None:
             self._queue_say("視覺識別功能未啟用，請設定 Gemini API Key")
             return
+        if self._latest_frame is None:
+            self._queue_say("目前沒有影像畫面")
+            return
         try:
-            # 從最新收到的 frame 取一幀（如果有的話）
-            # 注意：這裡需要 App 層保存最後一幀，目前以簡單版實現
-            if not hasattr(self, "_latest_frame") or self._latest_frame is None:
-                self._queue_say("目前沒有影像畫面")
-                return
-            frame = self._latest_frame
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, buf = cv2.imencode(".jpg", self._latest_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             img_bytes = buf.tobytes()
             description = await asyncio.to_thread(
                 self._gemini.describe_image, img_bytes,
@@ -509,11 +507,6 @@ class App:
         except Exception as e:
             log.warning("visual_query 失敗: %s", e)
             self._queue_say("無法識別畫面")
-
-    async def on_frame(self, peer: str, frame: np.ndarray) -> None:  # type: ignore[override]
-        # 保存最新幀供視覺問答使用
-        self._latest_frame = frame
-        await super().on_frame(peer, frame)  # type: ignore[misc]
 
     async def _llm_chat(self, text: str) -> None:
         """使用 Groq Llama 回答非指令的自然對話。"""
