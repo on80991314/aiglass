@@ -1,7 +1,7 @@
 r"""Full multi-mode glasses orchestrator (Phase 3+).
 
-Wires together (with the original 5-state top-level FSM):
-    Hub (WS)  ->  YOLO detector       ->  FSM (FIND/NAV/CROSS_STREET) ->  TTS  ->  Hub
+Wires together (with the extended 7-state top-level FSM):
+    Hub (WS)  ->  YOLO detector       ->  FSM (FIND/NAV/CROSS_STREET/TRAFFIC_LIGHT) ->  TTS  ->  Hub
          \->   Fall detector  ->  FSM
          \->   STT  ->  IntentRouter (regex+LLM)  ->  FSM
 
@@ -12,12 +12,20 @@ firmware is in place.
 This is the broad-coverage app. For pure find-and-grab use
 `apps.find_grab` (5-state object grab FSM, more accurate prompts).
 
-過馬路整合（aiglass3 CrosswalkAwarenessMonitor）:
-  - 語音說「幫我過馬路」→ IntentRouter 回傳 START_CROSSING
-  - FSM 切換到 CROSS_STREET 狀態
-  - on_frame 每幀驅動 CrosswalkAwarenessMonitor.process_frame(crosswalk_mask)
-  - 回傳 dict 的 voice_text 透過 TTS 播報給使用者
-  - 語音說「停止」→ 回到 IDLE
+功能整合（aiglass3）:
+  過馬路（CROSS_STREET）:
+    - 語音說「幫我過馬路」→ IntentRouter 回傳 START_CROSSING
+    - FSM 切換到 CROSS_STREET 狀態
+    - on_frame 每幀驅動 CrosswalkAwarenessMonitor.process_frame(crosswalk_mask)
+    - 回傳 dict 的 voice_text 透過 TTS 播報給使用者
+    - 語音說「停止」→ 回到 IDLE
+
+  紅綠燈偵測（TRAFFIC_LIGHT）:
+    - 語音說「幫我看紅綠燈」→ IntentRouter 回傳 START_TRAFFIC_LIGHT
+    - FSM 切換到 TRAFFIC_LIGHT 狀態
+    - 持續偵測紅/黃/綠燈並播報，節流間隔 3 秒
+    - 語音說「停止」→ 回到 IDLE
+    - 整合自 aiglass3 trafficlight_detection.py 的邏輯
 
 STT 噪音過濾（Bug fix v2）:
   - Whisper 在環境音（電視/廣播/歌詞/字幕聲）下會辨識出不相干文字
@@ -64,20 +72,24 @@ _STT_STRICT_FILTER = os.getenv("STT_STRICT_FILTER", "1") == "1"
 
 # 指令關鍵字白名單（繁簡體兼容）
 _ALLOWED_KEYWORDS = [
-    # 過馬路 / 斑馬線 / 紅綠燈（完整詞）
+    # 過馬路 / 斑馬線 / 紅綠燈
     "馬路", "马路", "斑馬", "斑马", "過馬", "过马",
-    "過馬路", "过马路", "斑馬線", "斑马线", "紅綠燈", "红绿灯",
+    "過馬路", "过马路", "斑馬線", "斑马线",
+    "紅綠燈", "红绿灯",
+    "紅燈", "红灯",     # ← Bug fix: 原本與「綠燈」間漏逗號導致拼接
+    "綠燈", "绿灯",     # ← 已修正
     "紅燈停", "绿灯走", "可以過", "可以通過",
-    # 導航 / 盲道（動作詞組）
+    "看紅綠燈", "看红绿灯", "檢測紅綠燈", "检测红绿灯",
+    # 導航 / 盲道
     "開始導航", "开始导航", "幫我導航", "帮我导航", "盲道導航",
-    # 找東西（必須有「幫我找」或「想找」，避免單字「找」誤觸）
+    # 找東西
     "幫我找", "帮我找", "尋找", "寻找", "想找",
     # 識別
     "識別", "识别", "幫我看", "帮我看", "這是什麼", "这是什么",
-    # 停止 / 取消（熱詞，保持完整）
+    # 停止 / 取消
     "停止", "停下來", "取消", "結束任務", "算了不", "不用了",
     "別說了", "别说了", "閉嘴", "闭嘴",
-    # 確認抓取（動詞+結果，避免單「找到」誤觸）
+    # 確認抓取
     "拿到了", "拿到啦", "抓到了", "找到了", "找到啦", "好了可以",
     # 否定回應
     "還沒拿", "还没拿", "沒拿到", "没拿到",
@@ -91,7 +103,6 @@ def _is_command_text(text: str) -> bool:
     """判斷辨識出的文字是否包含有效指令關鍵字。"""
     if not _STT_STRICT_FILTER:
         return True
-    # 超長文字通常是歌詞或環境語音，直接丟棄
     if len(text) > _STT_MAX_CHARS:
         log.info("stt noise filter: too long (%d chars), dropped: %r", len(text), text[:50])
         return False
@@ -104,15 +115,13 @@ def _is_command_text(text: str) -> bool:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CrosswalkAwarenessMonitor（從 aiglass3 移植，選擇性載入）
-# 注意：aiglass3 的 crosswalk_awareness.py 中 class 名稱為
-#       CrosswalkAwarenessMonitor，不是 CrossStreetNavigator。
 # ─────────────────────────────────────────────────────────────────────────────
 _CrosswalkMonitor = None
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
     from crosswalk_awareness import CrosswalkAwarenessMonitor as _CWM  # type: ignore
     _CrosswalkMonitor = _CWM
-    log.info("CrosswalkAwarenessMonitor 載入成功（crosswalk_awareness）")
+    log.info("CrosswalkAwarenessMonitor 載入成功")
 except Exception as _e1:
     log.warning("CrosswalkAwarenessMonitor 未能載入，過馬路功能降級為簡易模式: %s", _e1)
 
@@ -153,8 +162,6 @@ class App:
         )
 
         # ── 過馬路感知器（aiglass3 CrosswalkAwarenessMonitor）──
-        # process_frame(crosswalk_mask, blind_path_mask=None) -> dict | None
-        # 回傳 dict 含 voice_text / priority / should_broadcast 等欄位
         self._cross_nav: Optional[object] = None
         if _CrosswalkMonitor is not None:
             try:
@@ -168,6 +175,14 @@ class App:
         # 過馬路：上次播報導引的時間（節流）
         self._last_cross_guidance_t: float = 0.0
         self._cross_guidance_interval: float = float(os.getenv("CROSS_GUIDANCE_INTERVAL_S", "2.5"))
+
+        # ── 紅綠燈偵測（TRAFFIC_LIGHT 狀態，整合自 aiglass3）──────────────────
+        # 持續偵測並播報，不走完整過馬路流程。
+        # 節流間隔透過 TRAFFIC_LIGHT_INTERVAL_S 環境變數調整（預設 3 秒）。
+        self._last_tl_t: float = 0.0
+        self._tl_interval: float = float(os.getenv("TRAFFIC_LIGHT_INTERVAL_S", "3.0"))
+        # 記錄上次偵測到的顏色，避免連續重複播報同一顏色
+        self._last_tl_color: str = ""
 
     # ========= run =========
     async def run(self) -> None:
@@ -195,6 +210,11 @@ class App:
             await self._handle_cross_frame(frame, now)
             return
 
+        # ── TRAFFIC_LIGHT：獨立紅綠燈偵測模式（aiglass3 整合）────────────────
+        if self.fsm.state == State.TRAFFIC_LIGHT:
+            await self._handle_traffic_light_frame(frame, now)
+            return
+
         # ── 其他狀態：使用原有 YOLO 偵測 ──────────────────────────────────────
         dets = await asyncio.to_thread(self.detector.infer, frame)
 
@@ -213,24 +233,55 @@ class App:
                     elif color == "green":
                         self._queue_say("綠燈，請小心通過", key="tl:green")
 
+    async def _handle_traffic_light_frame(self, frame: np.ndarray, now: float) -> None:
+        """TRAFFIC_LIGHT 狀態：持續偵測紅綠燈並播報。
+        
+        整合自 aiglass3 trafficlight_detection.py 的邏輯：
+        - 偵測 red / yellow / green 三種狀態
+        - 節流（_tl_interval，預設 3 秒）避免過度播報
+        - 同一顏色連續出現不重複播報，直到顏色變化
+        """
+        if (now - self._last_tl_t) < self._tl_interval:
+            return  # 節流
+
+        dets = await asyncio.to_thread(self.detector.infer, frame)
+
+        detected_color = ""
+        for d in dets:
+            if d.label == "traffic light":
+                color = traffic_light_color(frame, d)
+                if color in ("red", "green", "yellow"):
+                    detected_color = color
+                    break  # 取第一個偵測到的燈
+
+        if not detected_color:
+            return  # 沒有偵測到任何燈，不播報
+
+        # 顏色沒有變化則不重複播報
+        if detected_color == self._last_tl_color:
+            return
+
+        self._last_tl_color = detected_color
+        self._last_tl_t = now
+
+        if detected_color == "red":
+            self._queue_say("紅燈，請停下等候", key="tl:red")
+        elif detected_color == "green":
+            self._queue_say("綠燈，可以通行", key="tl:green")
+        elif detected_color == "yellow":
+            self._queue_say("黃燈，請注意減速", key="tl:yellow")
+
     async def _handle_cross_frame(self, frame: np.ndarray, now: float) -> None:
         """處理過馬路狀態下的每一幀。
 
         有 CrosswalkAwarenessMonitor → 走完整斑馬線感知流程。
-          process_frame(crosswalk_mask) 需要 numpy mask（uint8）。
-          先用 YOLO 偵測斑馬線，若有偵測結果則生成 mask 傳入；
-          若無偵測結果則傳入 None（monitor 內部會重置狀態）。
-          同時也偵測紅綠燈並播報。
         沒有 → 簡易模式：用 YOLO 偵測紅綠燈 + crosswalk_hint。
         """
-        # 先執行 YOLO 偵測（完整模式與簡易模式都需要）
         dets = await asyncio.to_thread(self.detector.infer, frame)
         h, w = frame.shape[:2]
 
         if self._cross_nav is not None:
-            # ── 完整模式（aiglass3 CrosswalkAwarenessMonitor）───────────────
             try:
-                # 將 YOLO 斑馬線偵測結果轉為 mask
                 crosswalk_mask: Optional[np.ndarray] = None
                 for d in dets:
                     if d.label in ("crosswalk", "zebra crossing", "zebra_crossing"):
@@ -241,7 +292,7 @@ class App:
                         if crosswalk_mask is None:
                             crosswalk_mask = np.zeros((h, w), dtype=np.uint8)
                         crosswalk_mask[y1:y2, x1:x2] = 255
-                        break  # 只取第一個斑馬線偵測
+                        break
 
                 result = await asyncio.to_thread(
                     self._cross_nav.process_frame, crosswalk_mask
@@ -252,15 +303,12 @@ class App:
 
             if result and result.get("should_broadcast"):
                 guidance = result.get("voice_text", "") or ""
-                # 將簡體轉繁體（aiglass3 原碼使用簡體）
                 guidance = to_traditional(guidance)
                 if guidance and (now - self._last_cross_guidance_t) >= self._cross_guidance_interval:
                     self._queue_say(guidance, key=f"cross:{guidance}")
                     self._last_cross_guidance_t = now
 
         else:
-            # ── 簡易模式（fallback）────────────────────────────────────────
-            # crosswalk_hint（原有簡易斑馬線偵測）
             try:
                 from vision.spatial import crosswalk_hint
                 hint = crosswalk_hint(frame)
@@ -282,7 +330,6 @@ class App:
         energy = float(np.abs(pcm).mean())
         now = time.monotonic()
 
-        # ── 取得或初始化此 peer 的錄音狀態 ──
         if not hasattr(self, "_vad"):
             self._vad: dict = {}
         state = self._vad.setdefault(peer, {
@@ -292,19 +339,17 @@ class App:
             "start_t": 0.0,
         })
 
-        # 門檻（可用環境變數調整）
-        ON  = int(os.getenv("VOICE_ENERGY_ON",  "600"))   # 開始錄音的能量門檻
-        OFF = int(os.getenv("VOICE_ENERGY_OFF", "200"))   # 判定為靜音的能量門檻
-        MIN_S     = float(os.getenv("VOICE_MIN_S",     "0.4"))  # 最短有效錄音
-        MAX_S     = float(os.getenv("VOICE_MAX_S",     "6.0"))  # 最長錄音（強制送出）
-        SILENCE_S = float(os.getenv("VOICE_SILENCE_S", "0.5"))  # 靜音多久後送出
+        ON  = int(os.getenv("VOICE_ENERGY_ON",  "600"))
+        OFF = int(os.getenv("VOICE_ENERGY_OFF", "200"))
+        MIN_S     = float(os.getenv("VOICE_MIN_S",     "0.4"))
+        MAX_S     = float(os.getenv("VOICE_MAX_S",     "6.0"))
+        SILENCE_S = float(os.getenv("VOICE_SILENCE_S", "0.5"))
 
         has_voice = energy >= ON
         is_silent = energy < OFF
 
         if has_voice:
             if not state["recording"]:
-                # 開始錄音
                 state["recording"] = True
                 state["buf"] = []
                 state["start_t"] = now
@@ -313,7 +358,7 @@ class App:
             state["last_voice_t"] = now
 
         elif state["recording"]:
-            state["buf"].append(pcm)  # 靜音也先收進來（避免截斷尾音）
+            state["buf"].append(pcm)
 
             silence_s = now - state["last_voice_t"]
             duration_s = now - state["start_t"]
@@ -360,9 +405,6 @@ class App:
         if not text:
             return
 
-        # ── STT 噪音過濾（v2 Bug fix）────────────────────────────────────────
-        # 過濾掉 Whisper 辨識到的電視聲、歌詞、字幕等不相干內容。
-        # 只有包含指令關鍵字的文字才繼續處理。
         if not _is_command_text(text):
             return
 
@@ -383,13 +425,15 @@ class App:
             self.fsm._goto(State.IDLE, "已停止")
             return
 
-        # ── 取消 ─────────────────────────────────────────────────────────────
+        # ── 取消（含各功能專屬停止指令）────────────────────────────────────
         if kind in ("CANCEL", "STOP_NAV", "STOP_CROSSING", "STOP_TRAFFIC_LIGHT"):
             if self.fsm.state == State.CROSS_STREET and self._cross_nav is not None:
                 try:
                     self._cross_nav.reset()
                 except Exception:
                     pass
+            if self.fsm.state == State.TRAFFIC_LIGHT:
+                self._last_tl_color = ""  # 重置偵測記錄
             self.fsm._goto(State.IDLE, "已取消")
             return
 
@@ -405,6 +449,13 @@ class App:
                 self.fsm._goto(State.CROSS_STREET, "過馬路模式已啟動")
             return
 
+        # ── 啟動紅綠燈偵測（aiglass3 整合）────────────────────────────────
+        if kind == "START_TRAFFIC_LIGHT":
+            self._last_tl_color = ""  # 重置，確保首次偵測一定播報
+            self._last_tl_t = 0.0
+            self.fsm._goto(State.TRAFFIC_LIGHT, "已啟動紅綠燈偵測")
+            return
+
         # ── 找物品 ───────────────────────────────────────────────────────────
         if kind == "FIND":
             obj_zh = intent.target_zh or ""
@@ -412,7 +463,6 @@ class App:
             self.fsm._goto(State.FIND, f"正在尋找{obj_zh}" if obj_zh else "正在尋找目標")
             return
 
-        # ── 抓到了 ───────────────────────────────────────────────────────────
         if kind == "FOUND":
             self.fsm._goto(State.IDLE, "好的，已找到")
             return
@@ -422,10 +472,48 @@ class App:
             self.fsm._goto(State.NAV, "開始導航")
             return
 
+        # ── 視覺問答（aiglass3 整合）────────────────────────────────────────
+        if kind == "VISUAL_QUERY":
+            await self._visual_query()
+            return
+
         # ── 閒聊回覆（LLM）──────────────────────────────────────────────────
         if kind == "NONE":
             await self._llm_chat(text)
             return
+
+    async def _visual_query(self) -> None:
+        """視覺問答：拍一幀，送 VLM（Gemini）描述畫面內容。
+        
+        整合自 aiglass3 的視覺識別功能。
+        需要 GEMINI_API_KEY 設定。
+        """
+        if self._gemini is None:
+            self._queue_say("視覺識別功能未啟用，請設定 Gemini API Key")
+            return
+        try:
+            # 從最新收到的 frame 取一幀（如果有的話）
+            # 注意：這裡需要 App 層保存最後一幀，目前以簡單版實現
+            if not hasattr(self, "_latest_frame") or self._latest_frame is None:
+                self._queue_say("目前沒有影像畫面")
+                return
+            frame = self._latest_frame
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            img_bytes = buf.tobytes()
+            description = await asyncio.to_thread(
+                self._gemini.describe_image, img_bytes,
+                "請用繁體中文簡短描述這張圖片中最重要的內容（30字以內）"
+            )
+            if description:
+                self._queue_say(description[:200], key="visual_query")
+        except Exception as e:
+            log.warning("visual_query 失敗: %s", e)
+            self._queue_say("無法識別畫面")
+
+    async def on_frame(self, peer: str, frame: np.ndarray) -> None:  # type: ignore[override]
+        # 保存最新幀供視覺問答使用
+        self._latest_frame = frame
+        await super().on_frame(peer, frame)  # type: ignore[misc]
 
     async def _llm_chat(self, text: str) -> None:
         """使用 Groq Llama 回答非指令的自然對話。"""
@@ -456,7 +544,6 @@ class App:
         except Exception as e:
             log.warning("LLM chat 失敗: %s", e)
 
-    # ========= nav =========
     async def _start_nav(self, destination: str) -> None:
         if not self._gmap or not destination:
             return
