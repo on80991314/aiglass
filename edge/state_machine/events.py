@@ -7,10 +7,11 @@ from typing import Any
 
 class State(Enum):
     IDLE = auto()
-    NAV = auto()          # walking directions + crosswalk assist
-    FIND = auto()         # locate a named object
-    TRANSLATE = auto()    # ambient or dialog translation
-    FALL_ALERT = auto()   # confirmed fall, notifying contact
+    NAV = auto()            # walking directions + crosswalk assist
+    FIND = auto()           # locate a named object
+    TRANSLATE = auto()      # ambient or dialog translation
+    FALL_ALERT = auto()     # confirmed fall, notifying contact
+    CROSS_STREET = auto()   # 過馬路模式（斑馬線對齊 → 紅綠燈判定 → 通行引導）
 
 
 class Intent(Enum):
