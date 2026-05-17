@@ -2,18 +2,6 @@
 
 Runs in a background thread. Whenever it detects a completed utterance
 (brief silence after speech), it transcribes and fires the callback.
-
-Two VAD backends:
-  * energy  — pure mean(|pcm|) threshold (default, no extra dependency).
-  * webrtc  — Google WebRTC VAD via the `webrtcvad` / `webrtcvad-wheels`
-              package. Much better at rejecting keyboard clicks, fans,
-              and steady-state noise. Auto-falls-back to energy if the
-              package is missing.
-
-Optional MicGate integration: when the gate reports `is_suspended()`,
-incoming audio chunks are dropped and any in-progress utterance buffer
-is cleared. This stops the speaker output (voice cues / TTS) from
-being captured, retranscribed, and fed back as a fake user command.
 """
 
 from __future__ import annotations
@@ -21,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import queue  # 引入標準庫佇列
 from typing import Callable, Optional
 
 import numpy as np
@@ -54,7 +43,6 @@ class _WebRtcVad:
             return False
         frame_samples = int(sample_rate * self._FRAME_MS / 1000)
         b = pcm.astype(np.int16).tobytes()
-        # Sweep the chunk in 20ms windows; speech if any window says yes.
         any_speech = False
         for i in range(0, len(pcm) - frame_samples + 1, frame_samples):
             frame = b[i * 2:(i + frame_samples) * 2]
@@ -85,14 +73,12 @@ class MicListener:
         self.silence_after_speech_s = silence_after_speech_s
         self.max_utt_s = max_utt_s
         self.energy_thresh = energy_thresh
-        # Pre-roll: keep the last N chunks of audio so that when VAD finally
-        # triggers we can prepend the ~0.4s leading up to the trigger. Without
-        # this, the first syllable of short commands gets clipped.
+        
         chunk_s = self.chunk_samples / self.sample_rate
         self._preroll_chunks = max(1, int(round(preroll_s / chunk_s)))
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._stt = stt  # lazy-loaded if None
+        self._stt = stt  
         self._gate = gate
         self._vad_kind = vad
         self._vad = self._make_vad(vad, energy_thresh)
@@ -120,8 +106,6 @@ class MicListener:
         self._stop.set()
 
     def _ensure_stt(self):
-        # Caller may inject any object exposing transcribe_pcm(pcm, sr) -> str.
-        # Falls back to local faster-whisper if nothing was provided.
         if self._stt is None:
             from audio.stt import WhisperSTT
             self._stt = WhisperSTT(model_size="tiny", language="zh")
@@ -141,19 +125,33 @@ class MicListener:
         last_voice_t = 0.0
         utt_start = 0.0
 
+        # 實作理由：使用執行緒安全的 Queue 作為底層硬體與 Python 邏輯之間的隔離緩衝區
+        audio_queue = queue.Queue()
+
+        def audio_callback(indata, frames, time_info, status):
+            """PortAudio 原生底層 C 執行緒回呼，完全繞過 Python GIL 鎖限制。"""
+            if status:
+                log.debug("Sounddevice status: %s", status)
+            # 將採集到的 Mono 數據複製並安全壓入佇列，確保主執行緒卡頓重推理時，音訊絕不丟失
+            audio_queue.put(indata[:, 0].copy() if indata.ndim == 2 else indata.copy())
+
         log.info("mic listening at %d Hz (preroll=%d chunks)",
                  self.sample_rate, self._preroll_chunks)
         try:
+            # 使用非阻塞式 InputStream 並傳入 callback
             with sd.InputStream(samplerate=self.sample_rate,
                                 channels=1, dtype="int16",
-                                blocksize=self.chunk_samples) as stream:
+                                blocksize=self.chunk_samples,
+                                callback=audio_callback):
+                
                 while not self._stop.is_set():
-                    block, _ = stream.read(self.chunk_samples)
-                    pcm = block[:, 0].copy() if block.ndim == 2 else block.copy()
+                    try:
+                        # 從佇列非阻塞獲取音訊段，超時設定為 50ms 確保迴圈能定期響應 stop 事件
+                        pcm = audio_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
 
-                    # If the speaker is playing right now, drop this chunk
-                    # and forget any partial utterance — otherwise our own
-                    # voice cues come back as user commands.
+                    # 揚聲器播報期隔離閘
                     if self._gate is not None and self._gate.is_suspended():
                         if speaking:
                             buf.clear()
@@ -168,8 +166,6 @@ class MicListener:
                         if not speaking:
                             speaking = True
                             utt_start = now
-                            # Seed the utterance with the pre-roll so the
-                            # first syllable isn't lost.
                             buf = list(preroll)
                             preroll.clear()
                         last_voice_t = now
@@ -188,9 +184,7 @@ class MicListener:
                                 except Exception as e:
                                     log.warning("stt failed: %s", e)
                                     text = ""
-                                # Belt-and-braces: even if a custom STT
-                                # impl forgot to convert, we run s2t once
-                                # more here. Idempotent.
+                                
                                 text = to_traditional((text or "").strip())
                                 if text:
                                     log.info("heard: %s", text)
@@ -199,9 +193,6 @@ class MicListener:
                                     except Exception:
                                         log.exception("on_text callback crashed")
 
-                    # Maintain the pre-roll ring buffer in non-speaking
-                    # state. Always-on so the next utterance gets its leading
-                    # context.
                     if not speaking:
                         preroll.append(pcm)
                         if len(preroll) > self._preroll_chunks:

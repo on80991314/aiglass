@@ -28,7 +28,7 @@ import numpy as np
 import os
 from groq import Groq
 
-from audio.stt import WhisperSTT
+from audio.groq_stt import GroqWhisperSTT
 from audio.tts import TTS
 from audio.zh_normalizer import normalize_obj, to_traditional
 from server.hub import Hub
@@ -50,7 +50,7 @@ class App:
         self.hub = Hub(on_frame=self.on_frame, on_audio=self.on_audio, on_json=self.on_json)
         self.detector = YoloDetector(cfg.yolo_weights, cfg.yolo_device, cfg.yolo_conf)
         self.fall = FallDetector()
-        self.stt = WhisperSTT(cfg.stt_model, language=cfg.stt_language)
+        self.stt = GroqWhisperSTT()
         self.tts = TTS(cfg.tts_backend, cfg.tts_voice)
         self.throttle = SpeechThrottle(cfg.speech_min_gap_s, cfg.speech_repeat_gap_s)
         self.fsm = GlassesFSM(say=self._queue_say)
@@ -123,12 +123,12 @@ class App:
         # simple energy VAD - collect until ~1s of silence then transcribe
         energy = float(np.abs(pcm).mean())
         now = time.monotonic()
-        if energy > 100:
+        if energy > 400:
             self._last_audio_voice_t[peer] = now
 
         total_samples = sum(len(x) for x in buf)
         silence_s = now - self._last_audio_voice_t.get(peer, now)
-        if total_samples > sr * 10 or (total_samples > sr * 1 and silence_s > 2.0):
+        if total_samples > sr * 10 or (total_samples > sr * 0.5 and silence_s > 0.8):
             audio = np.concatenate(buf)
             buf.clear()
             self._last_audio_voice_t.pop(peer, None)
